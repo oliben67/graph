@@ -1,7 +1,7 @@
 import enum
 import json
 import warnings
-from typing import Any
+from typing import Any, Union
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -27,30 +27,33 @@ class Hashable(BaseModel):
     def __hash__(self) -> int:
         return hash(self.id)
 
+def restrict_member_class_init(cls):
+    cls._gate_keeper = None
+    
+    class MemberClass(Hashable):
+        def __init__(self, **data) -> None:
+            if cls._gate_keeper is None:
+                raise GraphError(f"An object of type '{type(self).__name__}' \
+can obly be created through an instance of '{cls.__name__}'.")
+            super().__init__(**data)
 
+    setattr(cls, "MemberClass", MemberClass) 
+    return cls
+
+@restrict_member_class_init
 class Graph(BaseModel):
     vertices: set["Vertex"] = set()
     edges: set["Edge"] = set()
 
-    _keeper = None
-
     def create_vertex(self, data) -> "Vertex":
-        Graph._keeper = self
+        Graph._gate_keeper = self
         vertex = Vertex(value=data, graph=self)
+        Graph._gate_keeper = None
         self.vertices.add(vertex)
-        Graph._keeper = None
         return vertex
 
-    class MemberClass(Hashable):
-        def __init__(self, **data) -> None:
-            if Graph._keeper is None:
-                raise GraphError(
-                    "You must create a vertex through a graph using the 'create_vertex' \
-method."
-                )
-            super().__init__(**data)
 
-
+@restrict_member_class_init
 class Vertex(Graph.MemberClass):
     value: Any = None
     graph: Graph = None
@@ -67,24 +70,27 @@ class Vertex(Graph.MemberClass):
 
         return wrapper
 
-    def _create_edge(self, vertex: "Vertex", value: Any = None) -> "Edge":
-        return Edge(weight=value, vertex1=self, vertex2=vertex, _graph=self.graph)
-    
-    @save_relationship
-    def edge(self, vertex: "Vertex", value: Any = None) -> "Edge":
-        return self._create_edge(vertex, value)
+    def _create_edge(self, vertex: "Vertex", weight: Any = None) -> "Edge":
+        Vertex._gate_keeper = self
+        edge = Edge(weight=weight, vertex1=self, vertex2=vertex, _graph=self.graph)
+        Vertex._gate_keeper = None
+        return edge
 
     @save_relationship
-    def ledge(self, vertex: "Vertex", value: Any = None) -> "Edge":
-        e = self._create_edge(vertex, value)
-        e.direction = Direction.LEFT
-        return e
+    def edge(self, vertex: "Vertex", weight: Any = None) -> "Edge":
+        return self._create_edge(vertex, weight)
 
     @save_relationship
-    def redge(self, vertex: "Vertex", value: Any = None) -> "Edge":
-        e = self._create_edge(vertex, value)
-        e.direction = Direction.RIGHT
-        return e
+    def ledge(self, vertex: "Vertex", weight: Any = None) -> "Edge":
+        edge = self._create_edge(vertex, weight)
+        edge.direction = Direction.LEFT
+        return edge
+
+    @save_relationship
+    def redge(self, vertex: "Vertex", weight: Any = None) -> "Edge":
+        edge = self._create_edge(vertex, weight)
+        edge.direction = Direction.RIGHT
+        return edge
 
     def __lt__(self, other: "Vertex") -> "Edge":
         return self.ledge(other)
@@ -105,34 +111,11 @@ class Vertex(Graph.MemberClass):
     __repr__ = __str__
 
 
-class Edge(Hashable):
+class Edge(Vertex.MemberClass):
     vertex1: Vertex = None
     vertex2: Vertex = None
     direction: Direction = Direction.NONE
     weight: Any = None
-        
-    def __init__(self, **data) -> None:
-        _graph = data.pop("_graph")
-        if _graph is None:
-            raise GraphError(
-                "To create an edge you must go through a vertex using the 'edge', 'ledge', \
-'redge' methods (or '-', '<', '>' operators) or pass _graph."
-            )
-        vertex1 = data["vertex1"]
-        vertex2 = data["vertex2"]
-        if vertex1 is None or vertex2 is None:
-            raise GraphError("You must pass vertex1 and vertex2.")
-        if vertex1.graph != vertex2.graph:
-            raise GraphError("Vertices must belong to the same graph.")
-        if vertex1.graph != _graph:
-            vertex1_str = f'{data["vertex1"]}'
-            vertex2_str = f'{data["vertex2"]}'
-            warnings.warn(f"Vertices '{vertex1_str}' and '{vertex2_str}' are not \
-members of ther target graph: they will be cloned.", GraphWarning)
-            data["vertex1"] = _graph.create_vertex(vertex1.dict())
-            data["vertex2"] = _graph.create_vertex(vertex2.dict())
-        super().__init__(**data)
-        
 
     def _get_unique_id(self) -> str:
         return f"{hash(self.vertex1)}{hash(self.vertex2)}{self.direction}{self.weight}"
@@ -143,6 +126,30 @@ members of ther target graph: they will be cloned.", GraphWarning)
     def __call__(self, weight: Any) -> "Edge":
         self.weight = weight
         return self
+
+    def edge(self, other: Union[Vertex, "Edge"], weight: Any = None) -> "Edge":
+        if isinstance(other, Vertex):
+            return self.vertex2.edge(other, weight)
+        return self.vertex2.edge(other.vertex1, weight)
+
+    def ledge(self, other: Union[Vertex, "Edge"], weight: Any = None) -> "Edge":
+        if isinstance(other, Vertex):
+            return self.vertex2.ledge(other, weight)
+        return self.vertex2.ledge(other.vertex1, weight)
+
+    def redge(self, other: Union[Vertex, "Edge"], weight: Any = None) -> "Edge":
+        if isinstance(other, Vertex):
+            return self.vertex2.rledge(other, weight)
+        return self.vertex2.redge(other.vertex1, weight)
+    
+    def __lt__(self, other: Union[Vertex, "Edge"]) -> "Edge":
+        return self.ledge(other)
+
+    def __gt__(self, other: Union[Vertex, "Edge"]) -> "Edge":
+        return self.redge(other)
+
+    def __sub__(self, other: Union[Vertex, "Edge"]) -> "Edge":
+        return self.edge(other)
 
     def __str__(self) -> str:
         if self.weight is None:

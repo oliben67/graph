@@ -14,3 +14,7 @@ def test_create_edge():
         pass
 
     r1 = t3 > t1
+    r2 = t3 - t1
+    r3 = t3 < t1
+    r3 = t3 < t2
+    r3 = (t3 < t3)(burp())
